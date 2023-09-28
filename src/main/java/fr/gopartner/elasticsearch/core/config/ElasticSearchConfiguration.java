@@ -10,6 +10,8 @@ import org.apache.http.auth.AuthScope;
 import org.apache.http.auth.UsernamePasswordCredentials;
 import org.apache.http.impl.client.BasicCredentialsProvider;
 import org.elasticsearch.client.RestClient;
+import org.elasticsearch.client.RestHighLevelClient;
+import org.elasticsearch.client.RestHighLevelClientBuilder;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -24,7 +26,6 @@ public class ElasticSearchConfiguration {
 
     @Value("${elasticsearch.username}")
     String username;
-
     @Value("${elasticsearch.password}")
     String password;
     @Value("${elasticsearch.host}")
@@ -33,35 +34,29 @@ public class ElasticSearchConfiguration {
     int port;
     @Value("${elasticsearch.caCertificatePath}")
     private String caCertificatePath;
+    @Value("${elasticsearch.connectionType}")
+    String connectionType;
 
-    @Bean
-    public RestClient getRestClient() throws IOException {
-
-
-        //tag::create-secure-client-cert
+    @Bean(destroyMethod = "close")
+    public RestHighLevelClient restHighLevelClient() throws IOException {
         File certFile = new File(caCertificatePath);
-
-        SSLContext sslContext = TransportUtils
-                .sslContextFromHttpCaCrt(certFile); // <1>
-
-        BasicCredentialsProvider credsProv = new BasicCredentialsProvider(); // <2>
-        credsProv.setCredentials(
-                AuthScope.ANY, new UsernamePasswordCredentials(username, password)
-        );
-
-        return RestClient
-                .builder(new HttpHost(host, port, "https")) // <3>
+        SSLContext sslContext = TransportUtils.sslContextFromHttpCaCrt(certFile);
+        BasicCredentialsProvider basicCredentialsProvider = new BasicCredentialsProvider();
+        basicCredentialsProvider.setCredentials(AuthScope.ANY, new UsernamePasswordCredentials(username, password));
+        return new RestHighLevelClientBuilder(RestClient.builder(new HttpHost(host, port, connectionType))
                 .setHttpClientConfigCallback(hc -> hc
-                        .setSSLContext(sslContext) // <4>
-                        .setDefaultCredentialsProvider(credsProv)
-                )
+                        .setSSLContext(sslContext)
+                        .setDefaultCredentialsProvider(basicCredentialsProvider
+                        )
+                ).build())
+                .setApiCompatibilityMode(true)
                 .build();
     }
 
     @Bean
     public ElasticsearchTransport getElasticsearchTransport() throws IOException {
         return new RestClientTransport(
-                getRestClient(), new JacksonJsonpMapper());
+                restHighLevelClient().getLowLevelClient(), new JacksonJsonpMapper());
     }
 
 

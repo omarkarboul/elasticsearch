@@ -1,141 +1,149 @@
 package fr.gopartner.elasticsearch.domain;
 
-import co.elastic.clients.elasticsearch.ElasticsearchClient;
-import co.elastic.clients.elasticsearch._types.query_dsl.MatchQuery;
-import co.elastic.clients.elasticsearch._types.query_dsl.Query;
-import co.elastic.clients.elasticsearch._types.query_dsl.RangeQuery;
-import co.elastic.clients.elasticsearch.core.*;
-import co.elastic.clients.elasticsearch.core.search.Hit;
-import co.elastic.clients.json.JsonData;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.extern.slf4j.Slf4j;
+import org.elasticsearch.ElasticsearchException;
+import org.elasticsearch.action.DocWriteResponse;
+import org.elasticsearch.action.delete.DeleteRequest;
+import org.elasticsearch.action.delete.DeleteResponse;
+import org.elasticsearch.action.get.GetRequest;
+import org.elasticsearch.action.get.GetResponse;
+import org.elasticsearch.action.index.IndexRequest;
+import org.elasticsearch.action.search.SearchRequest;
+import org.elasticsearch.action.search.SearchResponse;
+import org.elasticsearch.client.RequestOptions;
+import org.elasticsearch.client.RestHighLevelClient;
+import org.elasticsearch.common.unit.Fuzziness;
+import org.elasticsearch.index.query.MultiMatchQueryBuilder;
+import org.elasticsearch.index.query.Operator;
+import org.elasticsearch.index.query.QueryBuilders;
+import org.elasticsearch.search.SearchHit;
+import org.elasticsearch.search.builder.SearchSourceBuilder;
+import org.elasticsearch.xcontent.XContentType;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Repository;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
-import java.util.Objects;
 
 @Repository
+@Slf4j
 public class ProductRepository {
 
-    private final ElasticsearchClient elasticsearchClient;
+    private final RestHighLevelClient restHighLevelClient;
 
-    private final String indexName = "products";
+    @Value("${elasticsearch.indexName}")
+    String indexName;
 
-    public ProductRepository(ElasticsearchClient elasticsearchClient) {
-        this.elasticsearchClient = elasticsearchClient;
+    private final String NAME_FIELD = "name";
+    private final String DESCRIPTION_FIELD = "description";
+
+    public ProductRepository(RestHighLevelClient restHighLevelClient) {
+        this.restHighLevelClient = restHighLevelClient;
     }
 
-
     public String createOrUpdateDocument(Product product) throws IOException {
-
-        IndexResponse response = elasticsearchClient.index(i -> i
-                .index(indexName)
+        IndexRequest indexRequest = new IndexRequest(indexName)
                 .id(product.getId())
-                .document(product)
-        );
-        if (response.result().name().equals("Created")) {
-            return "Document has been successfully created.";
-        } else if (response.result().name().equals("Updated")) {
-            return "Document has been successfully updated.";
+                .source(new ObjectMapper().writeValueAsString(product), XContentType.JSON);
+
+        try {
+            restHighLevelClient.index(indexRequest, RequestOptions.DEFAULT);
+        } catch (Exception e) {
+            log.error(e.getMessage());
         }
-        return "Error while performing the operation.";
+
+        return "Successfully created a product";
     }
 
     public Product getDocumentById(String productId) throws IOException {
-        Product product = null;
-        GetResponse<Product> response = elasticsearchClient.get(g -> g
-                        .index(indexName)
-                        .id(productId),
-                Product.class
-        );
+        GetRequest getRequest = new GetRequest(indexName, productId);
 
-        if (response.found()) {
-            product = response.source();
-            System.out.println("Product name " + product.getName());
-        } else {
-            System.out.println("Product not found");
+        try {
+            GetResponse response = restHighLevelClient.get(getRequest, RequestOptions.DEFAULT);
+            if (response.isExists()) {
+                String sourceAsString = response.getSourceAsString();
+                Product product = new ObjectMapper().readValue(sourceAsString, Product.class);
+                log.info("product name " + product.getName());
+                return product;
+            } else {
+                log.info("product not found");
+            }
+        } catch (ElasticsearchException | IOException e) {
+            e.printStackTrace();
         }
 
-        return product;
+        return null;
     }
 
     public String deleteDocumentById(String productId) throws IOException {
+        DeleteRequest deleteRequest = new DeleteRequest(indexName, productId);
 
-        DeleteRequest request = DeleteRequest.of(d -> d.index(indexName).id(productId));
+        try {
+            DeleteResponse deleteResponse = restHighLevelClient.delete(deleteRequest, RequestOptions.DEFAULT);
 
-        DeleteResponse deleteResponse = elasticsearchClient.delete(request);
-        if (Objects.nonNull(deleteResponse.result()) && !deleteResponse.result().name().equals("NotFound")) {
-            return "Product with id " + deleteResponse.id() + " has been deleted.";
+            if (deleteResponse.getResult() == DocWriteResponse.Result.DELETED) {
+                return "Product with id " + productId + " has been deleted.";
+            } else if (deleteResponse.getResult() == DocWriteResponse.Result.NOT_FOUND) {
+                System.out.println("User not found");
+                return "Product with id " + productId + " does not exist.";
+            }
+        } catch (ElasticsearchException | IOException e) {
+            e.printStackTrace();
         }
-        System.out.println("Product not found");
-        return "Product with id " + deleteResponse.id() + " does not exist.";
 
+        return "Error while deleting the product.";
     }
 
     public List<Product> searchAllDocuments() throws IOException {
-        SearchRequest searchRequest = SearchRequest.of(s -> s.index(indexName));
-        SearchResponse searchResponse = elasticsearchClient.search(searchRequest, Product.class);
-        List<Hit> hits = searchResponse.hits().hits();
-        List<Product> products = new ArrayList<>();
-        for (Hit object : hits) {
-            products.add((Product) object.source());
+        SearchRequest searchRequest = new SearchRequest(indexName);
+        SearchSourceBuilder searchSourceBuilder = new SearchSourceBuilder();
+
+        try {
+            searchSourceBuilder.query(QueryBuilders.matchAllQuery());
+            return getProducts(searchRequest, searchSourceBuilder);
+        } catch (ElasticsearchException | IOException e) {
+            e.printStackTrace();
         }
-        return products;
+
+        return Collections.emptyList();
     }
 
-    public List<Product> searchProducts(String name, String description, Double price) throws IOException {
-        Query byName = MatchQuery.of(m -> m
-                .field("name")
-                .query(name)
-        )._toQuery();
+    public List<Product> searchByKeyword(String keyWord) throws IOException {
+        SearchRequest searchRequest = new SearchRequest(indexName);
+        SearchSourceBuilder searchSourceBuilder = new SearchSourceBuilder();
 
-        Query byDescription = MatchQuery.of(m -> m
-                .field("description")
-                .query(description)
-        )._toQuery();
+        try {
+            MultiMatchQueryBuilder multiMatchQuery = QueryBuilders.multiMatchQuery(keyWord)
+                    .operator(Operator.OR)
+                    .field(NAME_FIELD)
+                    .field(DESCRIPTION_FIELD)
+                    .fuzziness(Fuzziness.AUTO);
 
-        Query byMaxPrice = RangeQuery.of(r -> r
-                .field("price")
-                .gte(JsonData.of(price))
-        )._toQuery();
+            searchSourceBuilder.query(multiMatchQuery);
+            return getProducts(searchRequest, searchSourceBuilder);
+        } catch (ElasticsearchException | IOException e) {
+            e.printStackTrace();
+        }
 
-//        SearchResponse<Product> response = elasticsearchClient.search(s -> s
-//                                    .index("products")
-//                                    .query(q -> q
-//                                            .bool(b -> b
-//                                                    .must(byName)
-//                                                    .must(byDescription)
-//                                                    .must(byMaxPrice)
-//                                            )
-//                                    ),
-//                            Product.class
-//                    );
+        return Collections.emptyList();
+    }
 
-        SearchResponse<Product> response = elasticsearchClient.search(s -> s
-                .index("products")
-                .query(q -> q
-                        .multiMatch(m -> m
-                                .query(String.valueOf(MatchQuery.of(k -> k
-                                        .field("name")
-                                        .query(name)
-                                )))
-                                .queryName(String.valueOf(MatchQuery.of(k -> k
-                                        .field("description")
-                                        .query(description)
-                                )))
-                                .queryName(String.valueOf(RangeQuery.of(r -> r
-                                        .field("price")
-                                        .gte(JsonData.of(price))
-                                ))))),
-                Product.class
-        );
+    private List<Product> getProducts(SearchRequest searchRequest, SearchSourceBuilder searchSourceBuilder) throws IOException {
+        searchRequest.source(searchSourceBuilder);
 
+        SearchResponse searchResponse = restHighLevelClient.search(searchRequest, RequestOptions.DEFAULT);
+        SearchHit[] hits = searchResponse.getHits().getHits();
         List<Product> products = new ArrayList<>();
-        List<Hit<Product>> hits = response.hits().hits();
-        for (Hit<Product> hit : hits) {
-            Product product = hit.source();
+
+        for (SearchHit hit : hits) {
+            String sourceAsString = hit.getSourceAsString();
+            Product product = new ObjectMapper().readValue(sourceAsString, Product.class);
             products.add(product);
         }
+
         return products;
     }
 }

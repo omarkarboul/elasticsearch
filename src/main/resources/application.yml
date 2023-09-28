@@ -1,0 +1,10 @@
+elasticsearch:
+  caCertificatePath: C:\Users\karbo\http_ca.crt
+  username: elastic
+  port: '9200'
+  password: eg5D3qnYwsmv9SpQRUko
+  host: localhost
+  connectionType: https
+  indexName: products
+server:
+  port: '8899'
